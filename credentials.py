@@ -218,6 +218,22 @@ def _review(conn, credential):
             }}
 
 
+def load_credential(conn, credential_id):
+    """读取单条凭据（解析后的字典）；不存在返回 None。
+
+    供渠道台账等模块在自身事务内复用，不另开事务 / 快照。
+    """
+    row = conn.execute(
+        "SELECT * FROM release_credentials WHERE id = ?",
+        (credential_id,)).fetchone()
+    return _credential_dict(row) if row is not None else None
+
+
+def review_loaded(conn, credential):
+    """在调用方事务（一致读取快照）内复核已读取的凭据，供其他模块复用。"""
+    return _review(conn, credential)
+
+
 def credential_review(conn, credential_id):
     """查阅单条凭据：保留发行时结论，并在一致读取快照中复核现状。
 

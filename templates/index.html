@@ -175,6 +175,37 @@
     <div id="credential-detail"></div>
   </section>
 
+  <section class="card" id="distributions-card">
+    <h2>8. 渠道投放台账</h2>
+    <p class="hint">
+      为已封存的发行凭据登记渠道投放：录入凭据、渠道名与投放链接后，系统在同一写事务中复核来源 ——
+      仅当原访谈仍在、资料与封存时一致且当前整段可发布时，才保存「投放中」记录与登记时间；
+      否则说明原因且不留记录。列表与详情在一致读取快照中展示投放状态与凭据当前风险：
+      资料后来变化即提示「需处理」（即便仍可发布）；来源删除则提示「来源缺失」，
+      历史链接、登记时间与封存结论仍保留。确认渠道内容已撤下后可填写原因标记「已撤下」，
+      撤下时间保留，风险提示仍可查，凭据不改动。
+    </p>
+    <div class="row">
+      <label>凭据
+        <select id="dist-credential"></select>
+      </label>
+      <input id="dist-channel" placeholder="渠道名（如：音频平台 A）">
+      <input id="dist-url" class="url-input" placeholder="投放链接 https://...">
+      <button id="btn-add-distribution" class="primary">登记投放</button>
+      <button id="btn-refresh-distributions">刷新台账</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th><th>凭据</th><th>渠道</th><th>投放链接</th>
+          <th>投放状态</th><th>登记时间</th><th>撤下时间</th><th>凭据风险</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="distributions-body"></tbody>
+    </table>
+    <div id="distribution-detail"></div>
+  </section>
+
   <p id="status-line" role="status"></p>
 </main>
 <script src="/static/app.js"></script>

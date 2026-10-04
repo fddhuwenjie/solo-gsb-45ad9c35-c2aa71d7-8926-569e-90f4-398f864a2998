@@ -159,6 +159,18 @@ td.empty { color: var(--mute); text-align: center; }
 .badge.review { background: #fdf0d5; color: #8a5a00; }
 .badge.missing { background: var(--mute-bg); color: var(--mute); }
 
+/* 渠道台账：凭据风险（需处理 / 来源缺失复用配色）与投放状态 */
+.badge.action { background: #fdf0d5; color: #8a5a00; }
+.badge.dist-active { background: var(--ok-bg); color: var(--ok); }
+.badge.dist-withdrawn { background: var(--mute-bg); color: var(--mute); }
+
+.url-input { width: 280px; }
+.reason-input { width: 320px; }
+
+#distribution-detail h3 { font-size: 15px; margin: 16px 0 8px; }
+#distribution-detail h4 { font-size: 14px; margin: 14px 0 6px; }
+#distribution-detail:empty { display: none; }
+
 #credential-detail h3 { font-size: 15px; margin: 16px 0 8px; }
 #credential-detail h4 { font-size: 14px; margin: 14px 0 6px; }
 #credential-detail:empty { display: none; }

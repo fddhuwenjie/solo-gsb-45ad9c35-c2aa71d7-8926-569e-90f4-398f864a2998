@@ -6,7 +6,9 @@
  *  3. 保存发言区间 / 授权时发出的请求体正确；
  *  4. 校验结果渲染包含时间码与状态；
  *  5. 补件批次渲染、试算请求体与试算结果展示；
- *  6. 发行凭据列表渲染、封存请求体、409 阻断展示与查阅复核视图。 */
+ *  6. 发行凭据列表渲染、封存请求体、409 阻断展示与查阅复核视图；
+ *  7. 渠道投放台账：登记请求体与 409 不留记录提示、列表风险徽章、
+ *     查阅封存结论 / 来源缺失、撤下请求体与已撤下展示。 */
 const fs = require("fs");
 const vm = require("vm");
 const assert = require("assert");
@@ -37,6 +39,12 @@ const sandbox = {
       if (path === "/api/credentials") {
         return { ok: true, status: 200, json: async () => sandbox.__credList || [] };
       }
+      if (path === "/api/distributions") {
+        return { ok: true, status: 200, json: async () => sandbox.__distList || [] };
+      }
+      if (path.startsWith("/api/distributions/")) {
+        return { ok: true, status: 200, json: async () => sandbox.__distDetail };
+      }
       if (path.startsWith("/api/credentials/")) {
         return { ok: true, status: 200, json: async () => sandbox.__credDetail };
       }
@@ -44,6 +52,12 @@ const sandbox = {
     }
     if (path.endsWith("/remediate")) {
       return { ok: true, status: 200, json: async () => sandbox.__remResponse };
+    }
+    if (path.endsWith("/distributions") && opts && opts.method === "POST") {
+      return sandbox.__distCreate();
+    }
+    if (path.startsWith("/api/distributions/") && path.endsWith("/withdraw")) {
+      return sandbox.__distWithdraw();
     }
     if (path.endsWith("/credentials") && opts && opts.method === "POST") {
       return sandbox.__credCreate();
@@ -54,7 +68,7 @@ const sandbox = {
 vm.createContext(sandbox);
 const code = fs.readFileSync("static/app.js", "utf8");
 vm.runInContext(
-  code + "\nglobalThis.__test__ = { state, render, renderResults, saveSegment, saveLicense, fmt, parseTimecode, renderRemediate, submitRemediate, renderCredentials, createCredential, viewCredential };",
+  code + "\nglobalThis.__test__ = { state, render, renderResults, saveSegment, saveLicense, fmt, parseTimecode, renderRemediate, submitRemediate, renderCredentials, createCredential, viewCredential, renderCredentialOptions, renderDistributions, createDistribution, viewDistribution, withdrawDistribution, renderDistributionDetail };",
   sandbox
 );
 const T = sandbox.__test__;
@@ -280,6 +294,180 @@ async function main() {
   await T.viewCredential(5);
   assert.ok(elements.get("credential-detail").innerHTML.includes("来源缺失"),
     "原访谈删除后应显示来源缺失");
+
+  // 8. 渠道投放台账
+  // 8.1 凭据下拉选项来自凭据列表
+  T.state.credentials = [
+    { id: 5, interview_title: "示例", medium: "audio", publication_date: "2026-10-04",
+      status: "valid", status_label: "与发行时一致", changes: [] },
+    { id: 7, interview_title: "另一访谈", medium: "text", publication_date: "2026-11-01",
+      status: "review", status_label: "待复核", changes: ["时长"] },
+  ];
+  T.renderCredentialOptions();
+  const optHtml = elements.get("dist-credential").innerHTML;
+  assert.ok(optHtml.includes('value="5"'), "凭据下拉应含凭据 #5");
+  assert.ok(optHtml.includes("另一访谈"), "凭据下拉应渲染标题");
+  assert.ok(optHtml.includes("待复核"), "凭据下拉应显示凭据状态");
+
+  // 8.2 列表渲染：投放中 / 已撤下 + 风险徽章（需处理、来源缺失）
+  T.state.distributions = [
+    {
+      id: 11, status: "active", status_label: "投放中",
+      channel: "音频平台 A", url: "https://a.example.com/1",
+      registered_at: "2026-10-04 10:00:00", withdrawn_at: null, withdraw_reason: "",
+      credential: { id: 5, interview_title: "示例", medium: "audio",
+        publication_date: "2026-10-04", created_at: "2026-10-04 09:00:00",
+        status: "review", status_label: "待复核", changes: ["授权"],
+        risk: "action", risk_label: "需处理" },
+    },
+    {
+      id: 12, status: "withdrawn", status_label: "已撤下",
+      channel: "平台 B", url: "https://b.example.com/2",
+      registered_at: "2026-10-04 11:00:00",
+      withdrawn_at: "2026-10-05 12:00:00", withdraw_reason: "授权方要求撤下",
+      credential: { id: 7, interview_title: "另一访谈", medium: "text",
+        publication_date: "2026-11-01", created_at: "2026-11-01 08:00:00",
+        status: "missing", status_label: "来源缺失", changes: [],
+        risk: "missing", risk_label: "来源缺失" },
+    },
+  ];
+  T.renderDistributions();
+  const listHtml = elements.get("distributions-body").innerHTML;
+  assert.ok(listHtml.includes("badge dist-active"), "列表应含投放中徽章");
+  assert.ok(listHtml.includes("badge dist-withdrawn"), "列表应含已撤下徽章");
+  assert.ok(listHtml.includes("badge action"), "列表应含需处理风险徽章");
+  assert.ok(listHtml.includes("来源缺失"), "列表应显示来源缺失");
+  assert.ok(listHtml.includes("https://a.example.com/1"), "列表应含投放链接");
+  assert.ok(listHtml.includes("授权方要求撤下"), "列表应显示撤下原因");
+  assert.ok(listHtml.includes("2026-10-05 12:00:00"), "列表应显示撤下时间");
+  // 已撤下记录不显示撤下按钮，投放中显示
+  assert.ok(listHtml.includes("withdrawDistribution(11)"), "投放中应可撤下");
+  assert.ok(!listHtml.includes("withdrawDistribution(12)"), "已撤下不应再可撤下");
+
+  // 8.3 登记成功：请求体正确，随后查阅详情
+  el("dist-credential").value = "5";
+  el("dist-channel").value = "音频平台 A";
+  el("dist-url").value = "https://a.example.com/1";
+  sandbox.__distCreate = () => ({
+    ok: true, status: 201,
+    json: async () => distDetailActive(),
+  });
+  sandbox.__distDetail = distDetailActive();
+  sandbox.__distList = [distDetailActive()];
+  await T.createDistribution();
+  const distPost = calls.filter(
+    (c) => c.path.endsWith("/distributions") && c.opts && c.opts.method === "POST").pop();
+  assert.ok(distPost, "应发出登记投放请求");
+  assert.strictEqual(distPost.path, "/api/credentials/5/distributions");
+  assert.deepStrictEqual(JSON.parse(distPost.opts.body),
+    { channel: "音频平台 A", url: "https://a.example.com/1" });
+  assert.ok(elements.get("distribution-detail").innerHTML.includes("投放 #11"),
+    "登记成功后应展示详情");
+
+  // 8.4 详情：需处理（资料变化但仍可发布）+ 封存结论 + 撤下输入
+  let dhtml = elements.get("distribution-detail").innerHTML;
+  assert.ok(dhtml.includes("需处理"), "详情应提示需处理");
+  assert.ok(dhtml.includes("封存发行结论"), "详情应保留封存结论");
+  assert.ok(dhtml.includes("dist-withdraw-reason"), "投放中应提供撤下原因输入");
+  assert.ok(dhtml.includes('id="dist-withdraw-reason"'), "撤下原因输入应可填写");
+
+  // 8.5 登记被拒（409，资料变化）：说明原因且不留记录
+  sandbox.__distCreate = () => ({
+    ok: false, status: 409,
+    json: async () => ({
+      created: false, reason: "source_changed",
+      error: "资料与封存时不一致（变化：授权），未登记投放记录",
+      changes: ["授权"],
+      credential: {
+        id: 5, interview_title: "示例", medium: "audio",
+        publication_date: "2026-10-04", created_at: "2026-10-04 09:00:00",
+        status: "review", status_label: "待复核", changes: ["授权"],
+        risk: "action", risk_label: "需处理",
+        sealed: { inputs: {}, result: { intervals: [], summary: {} } },
+        current: { blocked: [] },
+      },
+    }),
+  });
+  await assert.rejects(T.createDistribution(), /未登记投放记录/);
+  const distFailHtml = elements.get("distribution-detail").innerHTML;
+  assert.ok(distFailHtml.includes("未登记投放记录"), "409 应说明原因");
+  assert.ok(distFailHtml.includes("需处理"), "409 应显示凭据当前风险");
+
+  // 8.6 撤下：请求体含原因，成功后展示已撤下与撤下时间，凭据风险仍可查
+  el("dist-withdraw-reason").value = "授权方要求撤下";
+  sandbox.__distWithdraw = () => ({
+    ok: true, status: 200,
+    json: async () => distDetailWithdrawn(),
+  });
+  sandbox.__distDetail = distDetailWithdrawn();
+  sandbox.__distList = [distDetailWithdrawn()];
+  await T.withdrawDistribution(11);
+  const wdPost = calls.filter((c) => c.path.endsWith("/withdraw")).pop();
+  assert.ok(wdPost, "应发出撤下请求");
+  assert.strictEqual(wdPost.path, "/api/distributions/11/withdraw");
+  assert.deepStrictEqual(JSON.parse(wdPost.opts.body),
+    { reason: "授权方要求撤下" });
+  const wdHtml = elements.get("distribution-detail").innerHTML;
+  assert.ok(wdHtml.includes("已撤下"), "撤下后应显示已撤下状态");
+  assert.ok(wdHtml.includes("2026-10-05 12:00:00"), "撤下后应保留撤下时间");
+  assert.ok(wdHtml.includes("授权方要求撤下"), "撤下后应显示撤下原因");
+  assert.ok(wdHtml.includes("需处理"), "撤下后风险提示仍可查");
+  assert.ok(!wdHtml.includes("dist-withdraw-reason"), "已撤下不应再显示撤下输入");
+
+  // 8.7 来源缺失详情：历史链接、时间与封存结论仍保留
+  sandbox.__distDetail = {
+    ...distDetailWithdrawn(),
+    credential: {
+      ...distDetailWithdrawn().credential,
+      status: "missing", status_label: "来源缺失", changes: [],
+      risk: "missing", risk_label: "来源缺失", current: null,
+    },
+  };
+  await T.viewDistribution(11);
+  const missHtml = elements.get("distribution-detail").innerHTML;
+  assert.ok(missHtml.includes("来源缺失"), "详情应显示来源缺失");
+  assert.ok(missHtml.includes("https://a.example.com/1"), "来源缺失时历史链接仍保留");
+  assert.ok(missHtml.includes("2026-10-04 10:00:00"), "来源缺失时登记时间仍保留");
+  assert.ok(missHtml.includes("封存发行结论"), "来源缺失时封存结论仍保留");
+
+  function distDetailActive() {
+    return {
+      id: 11, credential_id: 5, channel: "音频平台 A",
+      url: "https://a.example.com/1",
+      status: "active", status_label: "投放中",
+      registered_at: "2026-10-04 10:00:00", withdrawn_at: null, withdraw_reason: "",
+      credential: {
+        id: 5, interview_id: 1, interview_title: "示例", medium: "audio",
+        publication_date: "2026-10-04", created_at: "2026-10-04 09:00:00",
+        status: "review", status_label: "待复核", changes: ["授权"],
+        risk: "action", risk_label: "需处理",
+        sealed: {
+          inputs: { duration_seconds: 3600, speakers: [], segments: [], licenses: [] },
+          result: {
+            intervals: [{
+              start_seconds: 0, end_seconds: 3600,
+              start_timecode: "00:00:00", end_timecode: "01:00:00",
+              status: "ok", status_label: "可发布", publishable: true,
+              speakers: ["甲"], reasons: [],
+            }],
+            summary: { duration_seconds: 3600, blocked_seconds: 0, publishable_seconds: 3600 },
+          },
+        },
+        current: {
+          inputs: {}, intervals: [],
+          summary: { duration_seconds: 3600, blocked_seconds: 0, publishable_seconds: 3600 },
+          blocked: [],
+        },
+      },
+    };
+  }
+  function distDetailWithdrawn() {
+    return {
+      ...distDetailActive(),
+      status: "withdrawn", status_label: "已撤下",
+      withdrawn_at: "2026-10-05 12:00:00", withdraw_reason: "授权方要求撤下",
+    };
+  }
 
   console.log("test_frontend.js: 全部通过");
 }

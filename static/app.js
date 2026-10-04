@@ -15,6 +15,9 @@ const state = {
   remResult: null, // 最近一次补件试算 / 写入结果
   credentials: [], // 发行凭据列表（含当前状态）
   credentialDetail: null, // 正在查阅的凭据复核视图
+  distributions: [], // 渠道投放台账列表（含凭据当前风险）
+  distributionDetailId: null, // 正在查阅的台账记录 ID
+  distributionDetail: null, // 正在查阅的台账详情
 };
 
 const $ = (id) => document.getElementById(id);
@@ -95,13 +98,33 @@ async function refreshDetail() {
   state.detail = state.currentId
     ? await api(`/api/interviews/${state.currentId}`)
     : null;
-  // 资料变化会影响凭据状态（待复核 / 来源缺失），随访谈详情一并刷新
+  // 资料变化会影响凭据状态与台账风险（待复核 / 需处理 / 来源缺失），一并刷新
   state.credentials = await api("/api/credentials");
+  state.distributions = await api("/api/distributions");
 }
 
 async function loadCredentials() {
   state.credentials = await api("/api/credentials");
   renderCredentials();
+  await loadDistributions(false);
+}
+
+async function loadDistributions(renderCred = true) {
+  state.distributions = await api("/api/distributions");
+  renderCredentialOptions();
+  if (renderCred) renderCredentials();
+  renderDistributions();
+  // 正在查阅详情时，用最新快照重渲染（风险提示可能变化）
+  if (state.distributionDetailId) {
+    const d = state.distributions.find(
+      (x) => x.id === state.distributionDetailId);
+    if (d) {
+      state.distributionDetailId = d.id;
+      try {
+        await viewDistribution(d.id, true);
+      } catch (e) { /* 详情查阅失败不阻断列表刷新 */ }
+    }
+  }
 }
 
 /* ---------- 渲染 ---------- */
@@ -115,6 +138,8 @@ function render() {
     : `<option value="">（暂无访谈，请先新建）</option>`;
 
   renderCredentials(); // 凭据列表与访谈选择无关，始终渲染
+  renderCredentialOptions();
+  renderDistributions();
 
   const has = !!state.detail;
   $("detail-panels").classList.toggle("hidden", !has);
@@ -649,6 +674,177 @@ async function viewCredential(id) {
   renderCredentialDetail();
 }
 
+/* ---------- 渠道投放台账 ---------- */
+
+function distStatusBadge(d) {
+  return statusBadge(`dist-${d.status}`, d.status_label);
+}
+
+function credentialOptionLabel(c) {
+  return `#${c.id} ${c.interview_title} · ${c.publication_date} · ${mediumLabel(c.medium)}`
+    + `（${c.status_label}）`;
+}
+
+function renderCredentialOptions() {
+  const sel = $("dist-credential");
+  const prev = Number(sel.value);
+  sel.innerHTML = state.credentials.length
+    ? state.credentials.map((c) =>
+      `<option value="${c.id}" ${c.id === prev ? "selected" : ""}>`
+      + esc(credentialOptionLabel(c)) + "</option>").join("")
+    : `<option value="">（暂无已封存凭据）</option>`;
+}
+
+function renderDistributions() {
+  const rows = state.distributions.map((d) => {
+    const c = d.credential;
+    return `
+    <tr>
+      <td>#${d.id}</td>
+      <td><a href="#" onclick="run(() => viewCredential(${c.id}));return false;">`
+        + `#${c.id} ${esc(c.interview_title)}</a></td>
+      <td>${esc(d.channel)}</td>
+      <td>${d.url
+        ? `<a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${esc(d.url)}</a>`
+        : "—"}</td>
+      <td>${distStatusBadge(d)}${d.status === "withdrawn"
+        ? `<br><span class="hint">${esc(d.withdraw_reason || "")}</span>` : ""}</td>
+      <td class="tc">${esc(d.registered_at)}</td>
+      <td class="tc">${esc(d.withdrawn_at || "—")}</td>
+      <td>${statusBadge(c.risk, c.risk_label)}${c.changes.length
+        ? `<br><span class="hint">变化：${esc(c.changes.join("、"))}</span>` : ""}</td>
+      <td>
+        <button onclick="run(() => viewDistribution(${d.id}))">查阅</button>
+        ${d.status === "active"
+        ? `<button class="danger" onclick="run(() => withdrawDistribution(${d.id}))">撤下</button>`
+        : ""}
+      </td>
+    </tr>`;
+  }).join("");
+  $("distributions-body").innerHTML =
+    rows || `<tr><td colspan="9" class="empty">暂无渠道投放记录</td></tr>`;
+}
+
+function renderDistributionFailure(data) {
+  /* 登记被拒：说明原因且不留记录；凭据在时给出当前风险 / 阻断区间 */
+  let html = `<p class="bad-text">✘ ${esc(data.error)}</p>`;
+  const cred = data.credential;
+  if (cred) {
+    html += `<div class="summary">凭据 #${cred.id} · ${esc(cred.interview_title)}`
+      + ` · 当前风险 ${statusBadge(cred.risk, cred.risk_label)}</div>`;
+    if (cred.changes.length) {
+      html += `<p class="hint">变化类别：${esc(cred.changes.join("、"))}</p>`;
+    }
+    if (data.blocked && data.blocked.length) {
+      html += `<p class="bad-text">当前存在 ${data.blocked.length} 个阻断区间：</p>`
+        + intervalsTableHtml(data.blocked);
+    }
+  }
+  $("distribution-detail").innerHTML = html;
+}
+
+function renderDistributionDetail() {
+  const d = state.distributionDetail;
+  const box = $("distribution-detail");
+  if (!d) {
+    box.innerHTML = "";
+    return;
+  }
+  const c = d.credential;
+  const sealed = c.sealed.result.summary;
+  let html = `
+    <h3>投放 #${d.id} · ${esc(d.channel)} <span class="hint">（凭据 #${c.id} · ${esc(c.interview_title)}）</span></h3>
+    <div class="summary">
+      投放链接：<a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${esc(d.url)}</a><br>
+      投放状态 ${distStatusBadge(d)} · 登记于 <b class="tc">${esc(d.registered_at)}</b>`
+    + (d.withdrawn_at
+      ? ` · 撤下于 <b class="tc">${esc(d.withdrawn_at)}</b><br>撤下原因：${esc(d.withdraw_reason || "")}`
+      : "")
+    + `<br>凭据当前风险 ${statusBadge(c.risk, c.risk_label)}
+      （发布日期 <b>${esc(c.publication_date)}</b> · 媒介 <b>${mediumLabel(c.medium)}</b>
+      · 封存于 <b class="tc">${esc(c.created_at)}</b>）
+    </div>`;
+  if (c.risk === "missing") {
+    html += `<p class="bad-text">来源缺失：原访谈已删除，无法重新校验；`
+      + `以下为登记时所依据的封存发行结论，历史链接与时间仍保留。</p>`;
+  } else {
+    html += `<p>${c.risk === "action"
+      ? `<span class="bad-text">需处理：资料与封存时有变化（${esc(c.changes.join("、"))}），`
+        + `请尽快核查渠道内容；`
+        + (c.current.blocked.length ? "当前已出现不可发布区间："
+          : "当前重新校验虽仍可发布，也应先处理再继续投放。</span>")
+      : `<span class="ok-text">✔ 来源资料与封存时一致，当前整段可发布。</span>`}</p>`;
+    if (c.current.blocked.length) {
+      html += intervalsTableHtml(c.current.blocked);
+    }
+  }
+  html += `<h4>封存发行结论（不可修改）</h4>
+    <p class="hint">总时长 ${fmt(sealed.duration_seconds)}，`
+    + `可发布 ${fmt(sealed.publishable_seconds)}，阻断 ${fmt(sealed.blocked_seconds)}。</p>`
+    + intervalsTableHtml(c.sealed.result.intervals);
+  if (d.status === "active") {
+    html += `
+    <div class="row">
+      <input id="dist-withdraw-reason" class="reason-input" placeholder="撤下原因（必填，如：授权方要求撤下）">
+      <button class="danger" onclick="run(() => withdrawDistribution(${d.id}))">确认已撤下并标记</button>
+    </div>`;
+  } else {
+    html += `<p class="hint">该记录已撤下，撤下时间与原因已保留；凭据未改动，风险提示仍可在上方查看。</p>`;
+  }
+  box.innerHTML = html;
+}
+
+async function createDistribution() {
+  const credential_id = Number($("dist-credential").value);
+  if (!credential_id) throw new Error("请先封存并选择凭据");
+  const channel = $("dist-channel").value;
+  const url = $("dist-url").value;
+  let resp;
+  try {
+    resp = await fetch(`/api/credentials/${credential_id}/distributions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel, url }),
+    });
+  } catch (e) {
+    throw new Error("无法连接服务器");
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (resp.status === 409) {
+    // 复核未通过：说明原因，不落任何记录
+    state.distributionDetailId = null;
+    state.distributionDetail = null;
+    renderDistributionFailure(data);
+    throw new Error(data.error || "来源复核未通过，未登记投放记录");
+  }
+  if (!resp.ok) throw new Error(data.error || `请求失败（HTTP ${resp.status}）`);
+  $("dist-channel").value = "";
+  $("dist-url").value = "";
+  await loadDistributions(false);
+  await viewDistribution(data.id);
+  setStatus(`投放记录 #${data.id} 已登记（投放中）`);
+}
+
+async function viewDistribution(id, keepSilent) {
+  const detail = await api(`/api/distributions/${id}`);
+  state.distributionDetailId = id;
+  state.distributionDetail = detail;
+  renderDistributionDetail();
+  if (!keepSilent) renderDistributions();
+}
+
+async function withdrawDistribution(id) {
+  const input = $("dist-withdraw-reason");
+  const reason = input ? input.value.trim() : "";
+  if (!reason) throw new Error("请填写撤下原因");
+  const data = await api(`/api/distributions/${id}/withdraw`, "POST", { reason });
+  await loadDistributions(false);
+  state.distributionDetailId = data.id;
+  state.distributionDetail = data;
+  renderDistributionDetail();
+  setStatus(`投放记录 #${data.id} 已标记为已撤下（凭据未改动）`);
+}
+
 /* ---------- 启动 ---------- */
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -666,6 +862,8 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btn-rem-commit").addEventListener("click", () => run(() => submitRemediate(true)));
   $("btn-create-credential").addEventListener("click", () => run(createCredential));
   $("btn-refresh-credentials").addEventListener("click", () => run(loadCredentials));
+  $("btn-add-distribution").addEventListener("click", () => run(createDistribution));
+  $("btn-refresh-distributions").addEventListener("click", () => run(() => loadDistributions()));
   $("interview-select").addEventListener("change", (e) => run(async () => {
     state.currentId = Number(e.target.value) || null;
     state.remBatch = [];
