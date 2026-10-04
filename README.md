@@ -56,9 +56,15 @@ python app.py          # 默认监听 8000 端口，可用 PORT 环境变量修�
    才保存不可修改的凭据（封存当时的完整输入与校验结果），失败不留记录。
    凭据列表实时标注当前状态（与发行时一致 / 待复核 / 来源缺失），
    点「查阅」可对比发行时结论与当前复核结果。
+8. **渠道投放台账**：为已封存的凭据登记渠道投放（渠道名 + 投放链接）——
+   系统在同一事务中复核来源，仅当原访谈仍在、资料与封存时一致且当前整段
+   可发布时才保存「投放中」记录及登记时间，否则说明原因且不留记录。
+   列表与「查阅」展示投放状态与凭据当前风险（正常 / 需处理 / 来源缺失）；
+   确认渠道内容已撤下后点「撤下」，填写原因并标记「已撤下」，保留撤下时间。
 
 访谈、说话人、发言与授权记录均可在页面上直接修改、保存或删除；
-发行凭据封存后不可修改、不可删除，原访谈删除后仍可查阅。
+发行凭据封存后不可修改、不可删除，原访谈删除后仍可查阅；
+投放记录只增不删，撤下仅更新状态与撤下时间，凭据不改动。
 
 ## 补件并复核（批量补授权）
 
@@ -164,6 +170,60 @@ curl -s http://localhost:8000/api/credentials/1
 - `current.intervals` / `current.blocked`：按封存的发布日期与媒介对现有资料
   重新校验的结果与当前阻断区间；来源缺失时 `current` 为 null。
 
+## 渠道投放台账
+
+已封存的发行凭据可登记渠道投放。`POST /api/credentials/<id>/placements`
+在同一 SQLite 写事务（`BEGIN IMMEDIATE`）中复核来源：
+
+1. 凭据不存在 → HTTP 404；
+2. **仅当原访谈仍在、资料与封存时一致且当前整段可发布**，
+   才保存「投放中」记录及登记时间（HTTP 201）；
+3. 否则回滚，**说明原因且不留任何记录**（HTTP 409）：
+   `reason` 为 `missing`（来源缺失：原访谈已删除）、
+   `changed`（资料与封存时不一致，`changes` 列出变化类别，需处理后才能登记）
+   或 `blocked`（当前仍有不可发布区间，`blocked` 列出明细）。
+
+投放记录只增不删（数据库触发器保证）；登记时的凭据、渠道、链接与登记时间
+不可修改，已撤下的记录不可再改动。
+
+列表（`GET /api/placements`）与详情（`GET /api/placements/<id>`）在一致的
+读取快照（同一事务）中展示**投放状态**与**凭据当前风险**：
+
+| 风险 | 含义 |
+| --- | --- |
+| `ok` 正常 | 资料与封存时一致 |
+| `review` 需处理 | 资料后来有变化 —— 即便仍可发布；`current.blocked` 列出当前阻断区间 |
+| `missing` 来源缺失 | 原访谈已删除；历史链接、时间与封存结论仍保留（`current` 为 null） |
+
+确认渠道内容已撤下后，`POST /api/placements/<id>/withdraw` 填写原因并把
+记录标记为「已撤下」，保留撤下时间（`withdrawn_at`）；重复撤下返回 409 并
+保留原撤下时间。撤下后风险提示仍可查，凭据不改动。
+
+```bash
+# 登记投放（沿用上文已封存的凭据 #1）
+curl -s -X POST http://localhost:8000/api/credentials/1/placements \
+  -H 'Content-Type: application/json' \
+  -d '{"channel": "官网专题页", "url": "https://example.com/features/oral-history-1"}'
+
+# 投放列表（含投放状态与凭据当前风险）与投放详情（封存结论 + 当前阻断区间）
+curl -s http://localhost:8000/api/placements
+curl -s http://localhost:8000/api/placements/1
+
+# 确认渠道内容已撤下后，填写原因并标记为已撤下（保留撤下时间）
+curl -s -X POST http://localhost:8000/api/placements/1/withdraw \
+  -H 'Content-Type: application/json' \
+  -d '{"reason": "专题页已下线"}'
+```
+
+详情响应要点：
+
+- `status` / `status_label`：投放状态（投放中 / 已撤下）；
+  `created_at` 登记时间、`withdrawn_at` 撤下时间、`withdraw_reason` 撤下原因；
+- `credential.sealed_result`：凭据封存的发行时结论（不可修改，始终保留）；
+- `risk` / `risk_label` / `changes`：凭据当前风险与发生变化的资料类别；
+- `current.summary` / `current.blocked`：按封存的发布日期与媒介对现有资料
+  重新校验的汇总与当前阻断区间；来源缺失时 `current` 为 null。
+
 ## 数据持久化
 
 - 容器内数据库为 `/data/oral_history.db`，Compose / 运行命令已挂载卷 `oral_history_data`，重启不丢数据。
@@ -188,6 +248,10 @@ curl -s http://localhost:8000/api/credentials/1
 | POST | `/api/interviews/<id>/credentials` | 封存发行凭据 `{publication_date, medium}`：同一事务校验，全部可发布才落库，失败不留记录 |
 | GET | `/api/credentials` | 凭据列表（含当前状态：与发行时一致 / 待复核 / 来源缺失） |
 | GET | `/api/credentials/<id>` | 凭据详情：发行时结论 + 一致读取快照中的当前复核（变化类别、当前阻断区间） |
+| POST | `/api/credentials/<id>/placements` | 登记投放 `{channel, url}`：同一事务复核来源，全部满足才保存「投放中」记录，否则说明原因不留记录 |
+| GET | `/api/placements` | 投放列表（投放状态 + 凭据当前风险：正常 / 需处理 / 来源缺失） |
+| GET | `/api/placements/<id>` | 投放详情：封存结论 + 一致读取快照中的当前风险（变化类别、当前阻断区间） |
+| POST | `/api/placements/<id>/withdraw` | 撤下投放 `{reason}`：标记已撤下并保留撤下时间，凭据不改动 |
 
 ## 运行测试
 
@@ -195,8 +259,10 @@ curl -s http://localhost:8000/api/credentials/1
 python -m unittest test_evaluator.py -v   # 核心校验逻辑 + 补件批次校验（纯 Python）
 python -m unittest test_remediation.py -v # 补件事务编排（纯 Python + SQLite）
 python -m unittest test_credentials.py -v # 发行凭据事务编排（纯 Python + SQLite）
+python -m unittest test_placements.py -v  # 渠道投放台账事务编排（纯 Python + SQLite）
 python -m unittest test_remediate_api.py -v  # 补件接口 HTTP 层（需 Flask，Docker 镜像内可运行）
 python -m unittest test_credential_api.py -v # 凭据接口 HTTP 层（需 Flask，Docker 镜像内可运行）
+python -m unittest test_placement_api.py -v  # 投放台账接口 HTTP 层（需 Flask，Docker 镜像内可运行）
 node test_frontend.js                     # 前端交互冒烟测试（可选，需 Node）
 ```
 
@@ -207,11 +273,14 @@ app.py               Flask 应用与 REST API（SQLite 持久化）
 evaluator.py         核心校验逻辑：切分时间轴、逐段判定、相邻合并、补件批次校验
 remediation.py       补件并复核：同一 SQLite 事务中的试算与一次性写入
 credentials.py       发行凭据：同一事务中校验并封存，查阅时在一致快照中复核现状
+placements.py        渠道投放台账：同一事务复核来源并登记，一致快照查阅，撤下保留时间
 test_evaluator.py    核心逻辑单元测试
 test_remediation.py  补件事务编排单元测试（不依赖 Flask）
 test_credentials.py  发行凭据事务编排单元测试（不依赖 Flask）
+test_placements.py   渠道投放台账事务编排单元测试（不依赖 Flask）
 test_remediate_api.py 补件接口 HTTP 层测试（需 Flask）
 test_credential_api.py 凭据接口 HTTP 层测试（需 Flask）
+test_placement_api.py 投放台账接口 HTTP 层测试（需 Flask）
 templates/index.html 单页界面
 static/app.js        前端交互（原生 JavaScript）
 static/style.css     样式

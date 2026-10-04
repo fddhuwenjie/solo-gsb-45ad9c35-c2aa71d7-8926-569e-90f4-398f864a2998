@@ -15,6 +15,9 @@ const state = {
   remResult: null, // 最近一次补件试算 / 写入结果
   credentials: [], // 发行凭据列表（含当前状态）
   credentialDetail: null, // 正在查阅的凭据复核视图
+  placements: [], // 渠道投放台账列表（含投放状态与凭据风险）
+  placementDetail: null, // 正在查阅的投放记录详情
+  placementCredentialId: null, // 登记投放时选中的凭据
 };
 
 const $ = (id) => document.getElementById(id);
@@ -95,13 +98,19 @@ async function refreshDetail() {
   state.detail = state.currentId
     ? await api(`/api/interviews/${state.currentId}`)
     : null;
-  // 资料变化会影响凭据状态（待复核 / 来源缺失），随访谈详情一并刷新
+  // 资料变化会影响凭据状态（待复核 / 来源缺失）与投放风险，随访谈详情一并刷新
   state.credentials = await api("/api/credentials");
+  state.placements = await api("/api/placements");
 }
 
 async function loadCredentials() {
   state.credentials = await api("/api/credentials");
   renderCredentials();
+}
+
+async function loadPlacements() {
+  state.placements = await api("/api/placements");
+  renderPlacements();
 }
 
 /* ---------- 渲染 ---------- */
@@ -115,6 +124,7 @@ function render() {
     : `<option value="">（暂无访谈，请先新建）</option>`;
 
   renderCredentials(); // 凭据列表与访谈选择无关，始终渲染
+  renderPlacements(); // 投放台账与访谈选择无关，始终渲染
 
   const has = !!state.detail;
   $("detail-panels").classList.toggle("hidden", !has);
@@ -649,6 +659,150 @@ async function viewCredential(id) {
   renderCredentialDetail();
 }
 
+/* ---------- 渠道投放台账 ---------- */
+
+function renderPlacements() {
+  const sel = $("placement-credential");
+  sel.innerHTML = state.credentials.length
+    ? state.credentials.map((c) =>
+        `<option value="${c.id}"${c.id === state.placementCredentialId ? " selected" : ""}`
+        + `>#${c.id} ${esc(c.interview_title)}（${esc(c.publication_date)}`
+        + ` · ${mediumLabel(c.medium)}）</option>`).join("")
+    : `<option value="">（暂无发行凭据，请先封存）</option>`;
+  const rows = state.placements.map((p) => `
+    <tr>
+      <td>#${p.id}</td>
+      <td>#${p.credential_id}</td>
+      <td>${esc(p.interview_title)}</td>
+      <td>${esc(p.channel)}</td>
+      <td class="url-cell"><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url)}</a></td>
+      <td class="tc">${esc(p.created_at)}</td>
+      <td>${statusBadge(p.status, p.status_label)}${p.status === "withdrawn"
+        ? `<br><span class="hint">撤下于 ${esc(p.withdrawn_at)}</span>` : ""}</td>
+      <td>${statusBadge(p.risk, p.risk_label)}${p.changes.length
+        ? `<br><span class="hint">变化：${esc(p.changes.join("、"))}</span>` : ""}</td>
+      <td>
+        <button onclick="run(() => viewPlacement(${p.id}))">查阅</button>
+        ${p.status === "active"
+          ? `<button class="danger" onclick="run(() => withdrawPlacement(${p.id}))">撤下</button>`
+          : ""}
+      </td>
+    </tr>`).join("");
+  $("placements-body").innerHTML =
+    rows || `<tr><td colspan="9" class="empty">暂无投放记录</td></tr>`;
+}
+
+/* 登记失败（409）：说明原因，不落任何记录 */
+function renderPlacementFailure(data) {
+  let html = `<p class="bad-text">✘ ${esc(data.error)}</p>`
+    + `<p class="hint">未保存任何投放记录。</p>`;
+  if (data.blocked && data.blocked.length) {
+    html += `<p class="bad-text">当前 ${data.blocked.length} 个不可发布区间：</p>`
+      + intervalsTableHtml(data.blocked);
+  }
+  $("placement-detail").innerHTML = html;
+}
+
+function renderPlacementDetail() {
+  const d = state.placementDetail;
+  const box = $("placement-detail");
+  if (!d) {
+    box.innerHTML = "";
+    return;
+  }
+  const c = d.credential;
+  const sealed = c.sealed_result.summary;
+  let html = `
+    <h3>投放 #${d.id} · ${esc(d.channel)}</h3>
+    <div class="summary">
+      凭据 <b>#${d.credential_id}</b> · 访谈 <b>${esc(c.interview_title)}</b>
+      · 发布日期 <b>${esc(c.publication_date)}</b> · 媒介 <b>${mediumLabel(c.medium)}</b><br>
+      投放链接 <a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.url)}</a>
+      · 登记于 <b class="tc">${esc(d.created_at)}</b>
+      · 投放状态 ${statusBadge(d.status, d.status_label)}
+      · 凭据风险 ${statusBadge(d.risk, d.risk_label)}${d.changes.length
+        ? `（变化：${esc(d.changes.join("、"))}）` : ""}
+    </div>`;
+  if (d.status === "withdrawn") {
+    html += `<p class="hint">已撤下于 <span class="tc">${esc(d.withdrawn_at)}</span>`
+      + `${d.withdraw_reason ? `，原因：${esc(d.withdraw_reason)}` : ""}。</p>`;
+  } else {
+    html += `<div class="row">
+      <button class="danger" onclick="run(() => withdrawPlacement(${d.id}))">确认内容已撤下，标记为已撤下</button>
+    </div>`;
+  }
+  html += `<h4>封存结论（凭据发行时，不可修改）</h4>
+    <p class="hint">总时长 ${fmt(sealed.duration_seconds)}，`
+    + `可发布 ${fmt(sealed.publishable_seconds)}，`
+    + `阻断 ${fmt(sealed.blocked_seconds)}。</p>`;
+  if (d.risk === "missing") {
+    html += `<p class="bad-text">来源缺失：原访谈已删除，无法重新校验；`
+      + `历史链接、时间与封存结论仍保留。</p>`;
+  } else {
+    if (d.changes.length) {
+      html += `<p class="bad-text">资料与封存时不一致`
+        + `（${esc(d.changes.join("、"))}），需处理`
+        + `${d.current.blocked.length ? "；当前存在不可发布区间。" : "；当前重新校验仍可发布。"}</p>`;
+    } else {
+      html += `<p class="ok-text">✔ 现有资料与封存时一致。</p>`;
+    }
+    html += d.current.blocked.length
+      ? `<p class="bad-text">当前存在 ${d.current.blocked.length} 个阻断区间：</p>`
+        + intervalsTableHtml(d.current.blocked)
+      : `<p class="hint">当前无阻断区间。</p>`;
+  }
+  box.innerHTML = html;
+}
+
+async function createPlacement() {
+  const credential_id = Number($("placement-credential").value);
+  if (!credential_id) throw new Error("请先选择发行凭据");
+  const channel = $("placement-channel").value.trim();
+  const url = $("placement-url").value.trim();
+  if (!channel) throw new Error("请填写渠道名");
+  if (!url) throw new Error("请填写投放链接");
+  let resp;
+  try {
+    resp = await fetch(`/api/credentials/${credential_id}/placements`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel, url }),
+    });
+  } catch (e) {
+    throw new Error("无法连接服务器");
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (resp.status === 409) {
+    // 来源复核未通过：说明原因，不落任何记录
+    state.placementDetail = null;
+    renderPlacementFailure(data);
+    throw new Error(data.error || "来源复核未通过，未保存投放记录");
+  }
+  if (!resp.ok) throw new Error(data.error || `请求失败（HTTP ${resp.status}）`);
+  state.placementDetail = null;
+  $("placement-channel").value = "";
+  $("placement-url").value = "";
+  $("placement-detail").innerHTML =
+    `<p class="ok-text">✔ 投放记录 #${data.id} 已登记（投放中，`
+    + `登记时间 <span class="tc">${esc(data.created_at)}</span>）。</p>`;
+  await loadPlacements();
+}
+
+async function viewPlacement(id) {
+  state.placementDetail = await api(`/api/placements/${id}`);
+  renderPlacementDetail();
+}
+
+async function withdrawPlacement(id) {
+  const reason = prompt("确认渠道内容已撤下？请填写撤下原因（可留空）：");
+  if (reason === null) return; // 用户取消
+  await api(`/api/placements/${id}/withdraw`, "POST", { reason: reason.trim() });
+  await loadPlacements();
+  if (state.placementDetail && state.placementDetail.id === id) {
+    await viewPlacement(id); // 刷新详情：已撤下 + 撤下时间，风险提示仍可查
+  }
+}
+
 /* ---------- 启动 ---------- */
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -666,6 +820,11 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btn-rem-commit").addEventListener("click", () => run(() => submitRemediate(true)));
   $("btn-create-credential").addEventListener("click", () => run(createCredential));
   $("btn-refresh-credentials").addEventListener("click", () => run(loadCredentials));
+  $("btn-create-placement").addEventListener("click", () => run(createPlacement));
+  $("btn-refresh-placements").addEventListener("click", () => run(loadPlacements));
+  $("placement-credential").addEventListener("change", (e) => {
+    state.placementCredentialId = Number(e.target.value) || null;
+  });
   $("interview-select").addEventListener("change", (e) => run(async () => {
     state.currentId = Number(e.target.value) || null;
     state.remBatch = [];

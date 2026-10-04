@@ -6,7 +6,8 @@
  *  3. 保存发言区间 / 授权时发出的请求体正确；
  *  4. 校验结果渲染包含时间码与状态；
  *  5. 补件批次渲染、试算请求体与试算结果展示；
- *  6. 发行凭据列表渲染、封存请求体、409 阻断展示与查阅复核视图。 */
+ *  6. 发行凭据列表渲染、封存请求体、409 阻断展示与查阅复核视图；
+ *  7. 渠道投放台账列表渲染、登记请求体、409 原因展示、查阅风险视图与撤下。 */
 const fs = require("fs");
 const vm = require("vm");
 const assert = require("assert");
@@ -30,6 +31,7 @@ const sandbox = {
   document: { getElementById: (id) => el(id) },
   window: { addEventListener: () => {} },
   confirm: () => true,
+  prompt: () => "内容已下线",
   fetch: async (path, opts) => {
     calls.push({ path, opts });
     const isGet = !opts || !opts.method || opts.method === "GET";
@@ -40,6 +42,12 @@ const sandbox = {
       if (path.startsWith("/api/credentials/")) {
         return { ok: true, status: 200, json: async () => sandbox.__credDetail };
       }
+      if (path === "/api/placements") {
+        return { ok: true, status: 200, json: async () => sandbox.__placementList || [] };
+      }
+      if (path.startsWith("/api/placements/")) {
+        return { ok: true, status: 200, json: async () => sandbox.__placementDetail };
+      }
       return { ok: true, status: 200, json: async () => sandbox.__test__.state.detail };
     }
     if (path.endsWith("/remediate")) {
@@ -48,13 +56,19 @@ const sandbox = {
     if (path.endsWith("/credentials") && opts && opts.method === "POST") {
       return sandbox.__credCreate();
     }
+    if (path.endsWith("/placements") && opts && opts.method === "POST") {
+      return sandbox.__placementCreate();
+    }
+    if (path.endsWith("/withdraw")) {
+      return { ok: true, status: 200, json: async () => sandbox.__withdrawResponse };
+    }
     return { ok: true, status: 200, json: async () => ({}) };
   },
 };
 vm.createContext(sandbox);
 const code = fs.readFileSync("static/app.js", "utf8");
 vm.runInContext(
-  code + "\nglobalThis.__test__ = { state, render, renderResults, saveSegment, saveLicense, fmt, parseTimecode, renderRemediate, submitRemediate, renderCredentials, createCredential, viewCredential };",
+  code + "\nglobalThis.__test__ = { state, render, renderResults, saveSegment, saveLicense, fmt, parseTimecode, renderRemediate, submitRemediate, renderCredentials, createCredential, viewCredential, renderPlacements, createPlacement, viewPlacement, withdrawPlacement };",
   sandbox
 );
 const T = sandbox.__test__;
@@ -280,6 +294,128 @@ async function main() {
   await T.viewCredential(5);
   assert.ok(elements.get("credential-detail").innerHTML.includes("来源缺失"),
     "原访谈删除后应显示来源缺失");
+
+  // 8. 渠道投放台账：列表渲染、登记请求体、409 原因展示、查阅风险与撤下
+  T.state.credentials = [{
+    id: 5, interview_id: 1, interview_title: "示例",
+    medium: "audio", publication_date: "2026-10-04",
+    created_at: "2026-10-04 08:00:00",
+    status: "valid", status_label: "与发行时一致", changes: [],
+  }];
+  T.state.placements = [{
+    id: 7, credential_id: 5, interview_title: "示例",
+    medium: "audio", publication_date: "2026-10-04",
+    channel: "官网专题页", url: "https://example.com/f/1",
+    status: "active", status_label: "投放中",
+    created_at: "2026-10-04 09:00:00", withdrawn_at: null,
+    risk: "review", risk_label: "需处理", changes: ["授权"],
+  }];
+  T.renderPlacements();
+  const plcHtml = elements.get("placements-body").innerHTML;
+  assert.ok(plcHtml.includes("badge active"), "投放列表应含投放中徽章");
+  assert.ok(plcHtml.includes("badge review"), "投放列表应含需处理徽章");
+  assert.ok(plcHtml.includes("https://example.com/f/1"), "投放列表应含投放链接");
+  assert.ok(elements.get("placement-credential").innerHTML.includes("#5 示例"),
+    "凭据下拉应列出凭据");
+
+  // 登记成功：请求体正确，提示已登记
+  el("placement-credential").value = "5";
+  el("placement-channel").value = "官网专题页";
+  el("placement-url").value = "https://example.com/f/1";
+  sandbox.__placementCreate = () => ({
+    ok: true, status: 201,
+    json: async () => ({
+      id: 7, credential_id: 5, interview_title: "示例",
+      channel: "官网专题页", url: "https://example.com/f/1",
+      status: "active", status_label: "投放中",
+      created_at: "2026-10-04 09:00:00", created: true,
+    }),
+  });
+  await T.createPlacement();
+  const plcPost = calls.filter(
+    (c) => c.path === "/api/credentials/5/placements"
+      && c.opts && c.opts.method === "POST").pop();
+  assert.ok(plcPost, "应发出登记投放请求");
+  assert.deepStrictEqual(JSON.parse(plcPost.opts.body),
+    { channel: "官网专题页", url: "https://example.com/f/1" });
+  assert.ok(elements.get("placement-detail").innerHTML.includes("已登记"));
+
+  // 登记失败（409）：说明原因，不落任何记录
+  el("placement-channel").value = "官网专题页"; // 成功登记后表单已清空，重新填写
+  el("placement-url").value = "https://example.com/f/1";
+  sandbox.__placementCreate = () => ({
+    ok: false, status: 409,
+    json: async () => ({
+      credential_id: 5, interview_title: "示例", created: false,
+      reason: "changed", changes: ["授权"],
+      error: "资料与封存时不一致（授权有变化），需处理后才能登记投放",
+    }),
+  });
+  await assert.rejects(T.createPlacement(), /需处理/);
+  assert.ok(elements.get("placement-detail").innerHTML.includes("未保存任何投放记录"),
+    "409 应说明原因且提示不留记录");
+
+  // 查阅：需处理 + 封存结论 + 当前阻断区间
+  sandbox.__placementDetail = {
+    id: 7, credential_id: 5, interview_title: "示例",
+    medium: "audio", publication_date: "2026-10-04",
+    channel: "官网专题页", url: "https://example.com/f/1",
+    status: "active", status_label: "投放中",
+    created_at: "2026-10-04 09:00:00", withdrawn_at: null, withdraw_reason: "",
+    risk: "review", risk_label: "需处理", changes: ["授权"],
+    credential: {
+      id: 5, interview_id: 1, interview_title: "示例",
+      medium: "audio", publication_date: "2026-10-04",
+      created_at: "2026-10-04 08:00:00",
+      sealed_result: {
+        intervals: [],
+        summary: { duration_seconds: 3600, blocked_seconds: 0, publishable_seconds: 3600 },
+      },
+    },
+    current: {
+      summary: { duration_seconds: 3600, blocked_seconds: 600, publishable_seconds: 3000 },
+      blocked: [{
+        start_seconds: 600, end_seconds: 1200,
+        start_timecode: "00:10:00", end_timecode: "00:20:00",
+        status: "blocked", status_label: "不可发布",
+        speakers: ["张三"], reasons: ["张三：许可#1 明确拒绝音频媒介（拒绝优先）"],
+      }],
+    },
+  };
+  await T.viewPlacement(7);
+  const plcDetailHtml = elements.get("placement-detail").innerHTML;
+  assert.ok(plcDetailHtml.includes("需处理"), "查阅应显示需处理");
+  assert.ok(plcDetailHtml.includes("封存结论"), "查阅应保留封存结论");
+  assert.ok(plcDetailHtml.includes("00:10:00 – 00:20:00"), "查阅应列出当前阻断区间");
+
+  // 查阅：来源缺失（历史链接与封存结论仍保留）
+  sandbox.__placementDetail = {
+    ...sandbox.__placementDetail,
+    risk: "missing", risk_label: "来源缺失", changes: [], current: null,
+  };
+  await T.viewPlacement(7);
+  const missingHtml = elements.get("placement-detail").innerHTML;
+  assert.ok(missingHtml.includes("来源缺失"), "来源删除后应显示来源缺失");
+  assert.ok(missingHtml.includes("https://example.com/f/1"), "历史链接仍保留");
+
+  // 撤下：请求体正确，详情刷新为已撤下并保留撤下时间
+  sandbox.__withdrawResponse = {
+    id: 7, credential_id: 5, status: "withdrawn", status_label: "已撤下",
+    withdrawn: true, withdrawn_at: "2026-10-05 10:00:00",
+    withdraw_reason: "内容已下线",
+  };
+  sandbox.__placementDetail = {
+    ...sandbox.__placementDetail,
+    status: "withdrawn", status_label: "已撤下",
+    withdrawn_at: "2026-10-05 10:00:00", withdraw_reason: "内容已下线",
+  };
+  await T.withdrawPlacement(7);
+  const wdPost = calls.filter((c) => c.path === "/api/placements/7/withdraw").pop();
+  assert.ok(wdPost, "应发出撤下请求");
+  assert.deepStrictEqual(JSON.parse(wdPost.opts.body), { reason: "内容已下线" });
+  const wdHtml = elements.get("placement-detail").innerHTML;
+  assert.ok(wdHtml.includes("已撤下"), "撤下后详情应显示已撤下");
+  assert.ok(wdHtml.includes("2026-10-05 10:00:00"), "撤下后应保留撤下时间");
 
   console.log("test_frontend.js: 全部通过");
 }

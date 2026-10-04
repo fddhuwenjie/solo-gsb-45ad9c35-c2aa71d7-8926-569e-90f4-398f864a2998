@@ -7,6 +7,7 @@ from datetime import date
 from flask import Flask, g, jsonify, render_template, request
 
 import credentials
+import placements
 from evaluator import MEDIA_LABELS, evaluate_timeline
 from remediation import run_remediation
 
@@ -64,6 +65,34 @@ BEGIN SELECT RAISE(ABORT, '发行凭据不可修改'); END;
 CREATE TRIGGER IF NOT EXISTS release_credentials_no_delete
 BEFORE DELETE ON release_credentials
 BEGIN SELECT RAISE(ABORT, '发行凭据不可删除'); END;
+-- 渠道投放台账：已封存凭据的投放记录（投放中 / 已撤下）。
+CREATE TABLE IF NOT EXISTS channel_placements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id INTEGER NOT NULL REFERENCES release_credentials(id),
+    channel TEXT NOT NULL,
+    url TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'withdrawn')),
+    withdraw_reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    withdrawn_at TEXT
+);
+-- 台账只增不删；登记时的凭据、渠道、链接与登记时间不可修改；
+-- 已撤下的记录为最终状态，不可再改动（撤下时间随之保留）。
+CREATE TRIGGER IF NOT EXISTS channel_placements_no_delete
+BEFORE DELETE ON channel_placements
+BEGIN SELECT RAISE(ABORT, '投放记录不可删除'); END;
+CREATE TRIGGER IF NOT EXISTS channel_placements_sealed_fields
+BEFORE UPDATE ON channel_placements
+WHEN OLD.credential_id <> NEW.credential_id
+  OR OLD.channel <> NEW.channel
+  OR OLD.url <> NEW.url
+  OR OLD.created_at <> NEW.created_at
+BEGIN SELECT RAISE(ABORT, '投放记录的凭据、渠道、链接与登记时间不可修改'); END;
+CREATE TRIGGER IF NOT EXISTS channel_placements_no_reopen
+BEFORE UPDATE ON channel_placements
+WHEN OLD.status = 'withdrawn'
+BEGIN SELECT RAISE(ABORT, '投放记录已撤下，不可再修改'); END;
 """
 
 app = Flask(__name__)
@@ -582,6 +611,51 @@ def release_credential_detail(cid):
     if review is None:
         return error("凭据不存在", 404)
     return jsonify(review)
+
+
+# ---------------------------------------------------------------- 渠道投放台账
+
+@app.post("/api/credentials/<int:cid>/placements")
+def create_placement(cid):
+    """登记投放：录入渠道名与投放链接，在同一 SQLite 写事务中复核来源
+    —— 仅当原访谈仍在、资料与封存时一致且当前整段可发布时，才保存
+    「投放中」记录及登记时间；否则说明原因且不留任何记录。"""
+    data = payload()
+    channel = str(data.get("channel") or "").strip()
+    url = str(data.get("url") or "").strip()
+    if not channel:
+        return error("渠道名不能为空")
+    if not url:
+        return error("投放链接不能为空")
+    result, status = placements.register_placement(
+        get_db(), credential_id=cid, channel=channel, url=url)
+    return jsonify(result), status
+
+
+@app.get("/api/placements")
+def list_channel_placements():
+    """投放列表：一致读取快照中展示投放状态与凭据当前风险
+    （正常 / 需处理 / 来源缺失），历史链接与时间始终保留。"""
+    return jsonify(placements.list_placements(get_db()))
+
+
+@app.get("/api/placements/<int:pid>")
+def channel_placement_detail(pid):
+    """投放详情：投放状态、封存结论与凭据当前风险（含当前阻断区间）。"""
+    detail = placements.placement_review(get_db(), pid)
+    if detail is None:
+        return error("投放记录不存在", 404)
+    return jsonify(detail)
+
+
+@app.post("/api/placements/<int:pid>/withdraw")
+def withdraw_channel_placement(pid):
+    """撤下投放：确认渠道内容已撤下后填写原因，把记录标记为已撤下
+    并保留撤下时间；风险提示仍可查，凭据不改动。"""
+    reason = str(payload().get("reason") or "").strip()
+    result, status = placements.withdraw_placement(
+        get_db(), placement_id=pid, reason=reason)
+    return jsonify(result), status
 
 
 if __name__ == "__main__":

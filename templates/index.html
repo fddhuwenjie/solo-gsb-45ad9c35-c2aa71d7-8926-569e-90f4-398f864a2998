@@ -9,7 +9,7 @@
 <body>
 <header class="site-header">
   <h1>口述史发布许可校验台</h1>
-  <p class="subtitle">按发言与授权边界切分时间轴 · 拒绝优先 · 冲突 / 缺项 / 未解禁逐段标注 · 发行凭据可追溯封存 · 本地运行</p>
+  <p class="subtitle">按发言与授权边界切分时间轴 · 拒绝优先 · 冲突 / 缺项 / 未解禁逐段标注 · 发行凭据可追溯封存 · 渠道投放台账 · 本地运行</p>
 </header>
 
 <main>
@@ -173,6 +173,36 @@
       <tbody id="credentials-body"></tbody>
     </table>
     <div id="credential-detail"></div>
+  </section>
+
+  <section class="card" id="placements-card">
+    <h2>8. 渠道投放台账</h2>
+    <p class="hint">
+      为已封存的发行凭据登记渠道投放：选择凭据、录入渠道名与投放链接，
+      系统在同一事务中复核来源 —— 仅当原访谈仍在、资料与封存时一致且当前整段可发布时，
+      才保存「投放中」记录及登记时间，否则说明原因且不留记录。
+      列表与详情在一致的读取快照中展示投放状态与凭据当前风险：
+      资料后来变化即提示「需处理」（即便仍可发布），来源删除则提示「来源缺失」，
+      历史链接、时间与封存结论仍保留。
+      确认渠道内容已撤下后，可填写原因并标记「已撤下」，保留撤下时间；凭据不改动。
+    </p>
+    <div class="row">
+      <select id="placement-credential"></select>
+      <input id="placement-channel" placeholder="渠道名（如：官网专题页）">
+      <input id="placement-url" class="url-input" placeholder="投放链接 https://…">
+      <button id="btn-create-placement" class="primary">登记投放</button>
+      <button id="btn-refresh-placements">刷新投放列表</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th><th>凭据</th><th>访谈</th><th>渠道</th><th>投放链接</th>
+          <th>登记时间</th><th>投放状态</th><th>凭据风险</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="placements-body"></tbody>
+    </table>
+    <div id="placement-detail"></div>
   </section>
 
   <p id="status-line" role="status"></p>

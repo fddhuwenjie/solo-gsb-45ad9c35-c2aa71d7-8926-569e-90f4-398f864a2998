@@ -159,6 +159,21 @@ td.empty { color: var(--mute); text-align: center; }
 .badge.review { background: #fdf0d5; color: #8a5a00; }
 .badge.missing { background: var(--mute-bg); color: var(--mute); }
 
+/* 投放状态（凭据风险复用 .badge.ok / .review / .missing） */
+.badge.active { background: var(--ok-bg); color: var(--ok); }
+.badge.withdrawn { background: var(--mute-bg); color: var(--mute); }
+
+.url-cell {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#placement-detail h3 { font-size: 15px; margin: 16px 0 8px; }
+#placement-detail h4 { font-size: 14px; margin: 14px 0 6px; }
+#placement-detail:empty { display: none; }
+
 #credential-detail h3 { font-size: 15px; margin: 16px 0 8px; }
 #credential-detail h4 { font-size: 14px; margin: 14px 0 6px; }
 #credential-detail:empty { display: none; }
